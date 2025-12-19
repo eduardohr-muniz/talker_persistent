@@ -1,418 +1,17 @@
+import 'dart:async';
 import 'dart:developer';
 import 'dart:io';
-import 'dart:isolate';
-import 'dart:async';
 import 'dart:math' as math;
-import 'package:talker/talker.dart';
+
+import 'package:hive_ce/hive.dart';
 import 'package:path/path.dart' as path;
+import 'package:talker/talker.dart';
 import 'package:talker_dio_logger/dio_logs.dart';
 import 'package:talker_persistent/src/talker_persistent_service.dart';
-import 'package:hive_ce/hive.dart';
 
-/// Message types for isolate communication
-enum FileOperationType {
-  initialize,
-  write,
-  read,
-  dispose,
-}
-
-/// Message class for isolate communication
-///
 const String _extension = 'log';
 
-class FileOperationMessage {
-  final FileOperationType type;
-  final String? filePath;
-  final List<String>? logs;
-  final int? maxCapacity;
-  final bool? saveAllLogs;
-  final LogRetentionPeriod? logRetentionPeriod;
-  final int? maxFileSize;
-  final String? logName; // Identificador único para cada instância
-  SendPort? responsePort;
-
-  FileOperationMessage({
-    required this.type,
-    this.filePath,
-    this.logs,
-    this.maxCapacity,
-    this.saveAllLogs,
-    this.logRetentionPeriod,
-    this.maxFileSize,
-    this.logName,
-    this.responsePort,
-  });
-}
-
-/// Response class for isolate communication
-class FileOperationResponse {
-  final bool success;
-  final String? error;
-  final int? logCount;
-  final String? content;
-
-  FileOperationResponse({
-    required this.success,
-    this.error,
-    this.logCount,
-    this.content,
-  });
-}
-
-/// Classe para gerenciar o isolate singleton
-class _IsolateManager {
-  static _IsolateManager? _instance;
-  static _IsolateManager get instance => _instance ??= _IsolateManager._();
-
-  Isolate? _isolate;
-  SendPort? _sendPort;
-  ReceivePort? _receivePort;
-  ReceivePort? _responsePort;
-  bool _isInitialized = false;
-  final Map<String, Completer<FileOperationResponse>> _pendingRequests = {};
-  Completer<void>? _initializationCompleter;
-
-  _IsolateManager._();
-
-  Future<void> initialize() async {
-    // Se já está inicializado, retorna imediatamente
-    if (_isInitialized) {
-      return;
-    }
-
-    // Se já está inicializando, aguarda
-    if (_initializationCompleter != null) {
-      await _initializationCompleter!.future;
-      return;
-    }
-
-    // Inicia inicialização
-    _initializationCompleter = Completer<void>();
-
-    try {
-      _receivePort = ReceivePort();
-      _isolate = await Isolate.spawn(_fileOperationsIsolate, _receivePort!.sendPort);
-
-      // Timeout para evitar travamento
-      _sendPort = await _receivePort!.first.timeout(
-        Duration(seconds: 10),
-        onTimeout: () {
-          throw Exception('Isolate initialization timeout');
-        },
-      ) as SendPort;
-
-      _responsePort = ReceivePort();
-
-      // Listener para respostas - usando ReceivePort separado
-      _responsePort!.listen((message) {
-        try {
-          // Se for uma resposta de operação
-          if (message is Map<String, dynamic> && message.containsKey('requestId')) {
-            final requestId = message['requestId'] as String;
-            final response = FileOperationResponse(
-              success: message['success'] as bool,
-              error: message['error'] as String?,
-              logCount: message['logCount'] as int?,
-              content: message['content'] as String?,
-            );
-
-            final completer = _pendingRequests.remove(requestId);
-            if (completer != null && !completer.isCompleted) {
-              completer.complete(response);
-            }
-          }
-        } catch (e) {
-          // Se houver erro no parsing da mensagem, tentar limpar requisições órfãs
-          _cleanupOrphanedRequests();
-        }
-      }, onError: (error) {
-        _cleanupOrphanedRequests();
-      });
-
-      _isInitialized = true;
-      _initializationCompleter!.complete();
-    } catch (e) {
-      // Reset state em caso de falha
-      _isInitialized = false;
-      _isolate?.kill();
-      _receivePort?.close();
-      _responsePort?.close();
-      _isolate = null;
-      _sendPort = null;
-      _receivePort = null;
-      _responsePort = null;
-
-      _initializationCompleter!.completeError(e);
-      _initializationCompleter = null;
-
-      throw Exception('Failed to initialize isolate: $e');
-    }
-  }
-
-  Future<FileOperationResponse> sendMessage(FileOperationMessage message) async {
-    try {
-      if (!_isInitialized) {
-        await initialize();
-      }
-
-      // Verifica se o isolate ainda está ativo
-      if (_sendPort == null || _responsePort == null) {
-        throw Exception('Isolate not properly initialized');
-      }
-
-      final requestId = '${DateTime.now().millisecondsSinceEpoch}_${math.Random().nextInt(1000000)}';
-
-      final completer = Completer<FileOperationResponse>();
-      _pendingRequests[requestId] = completer;
-
-      final messageWithId = {
-        'requestId': requestId,
-        'type': message.type.index,
-        'filePath': message.filePath,
-        'logs': message.logs,
-        'maxCapacity': message.maxCapacity,
-        'saveAllLogs': message.saveAllLogs,
-        'logRetentionPeriod': message.logRetentionPeriod?.index,
-        'maxFileSize': message.maxFileSize,
-        'logName': message.logName,
-        'responsePort': _responsePort!.sendPort,
-      };
-
-      _sendPort!.send(messageWithId);
-
-      // Timeout para evitar travamento se o isolate não responder
-      return completer.future.timeout(
-        Duration(seconds: 30),
-        onTimeout: () {
-          _pendingRequests.remove(requestId);
-          return FileOperationResponse(
-            success: false,
-            error: 'Isolate response timeout',
-          );
-        },
-      );
-    } catch (e) {
-      return FileOperationResponse(
-        success: false,
-        error: 'Failed to send message to isolate: $e',
-      );
-    }
-  }
-
-  /// Limpa requisições órfãs que podem ter ficado pendentes
-  void _cleanupOrphanedRequests() {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final orphanedKeys = <String>[];
-
-    for (final entry in _pendingRequests.entries) {
-      final requestTime = int.tryParse(entry.key.split('_').first) ?? 0;
-      // Remove requisições com mais de 60 segundos
-      if (now - requestTime > 60000) {
-        orphanedKeys.add(entry.key);
-        if (!entry.value.isCompleted) {
-          entry.value.completeError('Request timed out and was cleaned up');
-        }
-      }
-    }
-
-    for (final key in orphanedKeys) {
-      _pendingRequests.remove(key);
-    }
-
-    if (orphanedKeys.isNotEmpty) {}
-
-    // Se há muitas requisições pendentes, pode indicar problemas no isolate
-    if (_pendingRequests.length > 50) {
-      _forceResetIsolate();
-    }
-  }
-
-  /// Reset forçado do isolate em caso de problemas críticos
-  void _forceResetIsolate() {
-    try {
-      // Completar todas as requisições pendentes com erro
-      for (final completer in _pendingRequests.values) {
-        if (!completer.isCompleted) {
-          completer.completeError('Isolate force reset');
-        }
-      }
-      _pendingRequests.clear();
-
-      // Matar o isolate atual
-      _isolate?.kill();
-      _receivePort?.close();
-      _responsePort?.close();
-
-      // Reset state
-      _isolate = null;
-      _sendPort = null;
-      _receivePort = null;
-      _responsePort = null;
-      _isInitialized = false;
-      _initializationCompleter = null;
-    } catch (e) {
-      log(e.toString(), name: 'TalkerPersistentHistory');
-    }
-  }
-
-  void dispose() {
-    _isolate?.kill();
-    _receivePort?.close();
-    _responsePort?.close();
-    _isInitialized = false;
-    // Completa todas as requisições pendentes com erro antes de limpar
-    for (final completer in _pendingRequests.values) {
-      if (!completer.isCompleted) {
-        completer.completeError('Isolate disposed');
-      }
-    }
-    _pendingRequests.clear();
-    _initializationCompleter = null;
-  }
-}
-
-/// Isolate function to handle file operations (singleton)
-Future<void> _fileOperationsIsolate(SendPort sendPort) async {
-  try {
-    final receivePort = ReceivePort();
-    sendPort.send(receivePort.sendPort);
-
-    // Map para gerenciar múltiplos arquivos de log
-    final Map<String, _LogFileManager> fileManagers = {};
-
-    await for (final message in receivePort) {
-      // PROTEÇÃO TOTAL: Envolver tudo em try-catch para evitar crashes
-      String? requestId;
-      SendPort? responsePort;
-
-      try {
-        if (message is! Map<String, dynamic>) {
-          continue;
-        }
-
-        // SAFE CASTING: Verificar cada campo antes de fazer cast
-        requestId = message['requestId']?.toString();
-        if (requestId == null || requestId.isEmpty) {
-          continue;
-        }
-
-        final typeIndex = message['type'];
-        if (typeIndex is! int || typeIndex < 0 || typeIndex >= FileOperationType.values.length) {
-          throw Exception('Invalid operation type index: $typeIndex');
-        }
-        final type = FileOperationType.values[typeIndex];
-
-        final filePath = message['filePath'] as String?;
-
-        // Safe casting para logs
-        List<String>? logs;
-        if (message['logs'] is List) {
-          try {
-            logs = (message['logs'] as List<dynamic>).map((e) => e.toString()).toList();
-          } catch (e) {
-            logs = null;
-          }
-        }
-
-        final saveAllLogs = message['saveAllLogs'] as bool?;
-
-        // Safe casting para logRetentionPeriod
-        LogRetentionPeriod? logRetentionPeriod;
-        final retentionIndex = message['logRetentionPeriod'];
-        if (retentionIndex is int && retentionIndex >= 0 && retentionIndex < LogRetentionPeriod.values.length) {
-          logRetentionPeriod = LogRetentionPeriod.values[retentionIndex];
-        }
-
-        final maxFileSize = message['maxFileSize'] as int?;
-        final logName = message['logName'] as String?;
-        responsePort = message['responsePort'] as SendPort?;
-
-        FileOperationResponse response;
-
-        switch (type) {
-          case FileOperationType.initialize:
-            if (logName != null && filePath != null) {
-              fileManagers[logName] = _LogFileManager(
-                filePath: filePath,
-                saveAllLogs: saveAllLogs ?? false,
-                logRetentionPeriod: logRetentionPeriod,
-                maxFileSize: maxFileSize,
-              );
-              await fileManagers[logName]!.initialize();
-              response = FileOperationResponse(success: true, logCount: 0);
-            } else {
-              response = FileOperationResponse(success: false, error: 'Invalid parameters');
-            }
-            break;
-
-          case FileOperationType.write:
-            if (logName != null && fileManagers.containsKey(logName)) {
-              await fileManagers[logName]!.write(logs ?? []);
-              response = FileOperationResponse(success: true);
-            } else {
-              response = FileOperationResponse(success: false, error: 'Log manager not found');
-            }
-            break;
-
-          case FileOperationType.read:
-            if (logName != null && fileManagers.containsKey(logName)) {
-              final content = await fileManagers[logName]!.read();
-              response = FileOperationResponse(success: true, content: content);
-            } else {
-              response = FileOperationResponse(success: false, error: 'Log manager not found');
-            }
-            break;
-
-          case FileOperationType.dispose:
-            if (logName != null && fileManagers.containsKey(logName)) {
-              await fileManagers[logName]!.dispose();
-              fileManagers.remove(logName);
-              response = FileOperationResponse(success: true);
-            } else {
-              response = FileOperationResponse(success: true);
-            }
-            break;
-        }
-
-        if (responsePort != null) {
-          responsePort.send({
-            'requestId': requestId,
-            'success': response.success,
-            'error': response.error,
-            'logCount': response.logCount,
-            'content': response.content,
-          });
-        }
-      } catch (e) {
-        // Tentar responder com o erro, mas de forma segura
-        try {
-          if (responsePort != null && requestId != null) {
-            responsePort.send({
-              'requestId': requestId,
-              'success': false,
-              'error': 'Isolate operation error: $e',
-            });
-          }
-        } catch (sendError) {
-          log(sendError.toString(), name: 'TalkerPersistentHistory');
-        }
-      }
-    }
-  } catch (globalError) {
-    // PROTEÇÃO GLOBAL: Se qualquer coisa falhar no isolate, capturar aqui
-
-    // Tentar notificar o erro de volta, mas não crashar se falhar
-    try {
-      sendPort.send({
-        'isolateError': true,
-        'error': 'Critical isolate failure: $globalError',
-      });
-    } catch (criticalError) {
-      log(criticalError.toString(), name: 'TalkerPersistentHistory');
-    }
-  }
-}
+/// Todas operações de arquivo são realizadas diretamente na thread principal.
 
 /// Classe para gerenciar um arquivo de log específico
 class _LogFileManager {
@@ -695,9 +294,15 @@ class TalkerPersistentConfig {
   /// Quando o arquivo atinge este tamanho, um novo arquivo é criado
   final int maxFileSize;
 
-  /// Se deve usar isolate para operações de arquivo (padrão: true)
-  /// Quando false, as operações de arquivo são feitas na thread principal
-  final bool useIsolate;
+  /// Whether to log request body in HTTP logs
+  /// When true, request body will be included in [REQUEST] logs
+  final bool logRequestBody;
+
+  /// Maximum length in characters for request body logging
+  /// If the body exceeds this length, it will be truncated
+  final int maxRequestBodyLength;
+
+  // Isolates removidos: todas operações são diretas na thread principal
 
   const TalkerPersistentConfig({
     this.bufferSize = 100,
@@ -708,8 +313,35 @@ class TalkerPersistentConfig {
     this.saveAllLogs = false,
     this.logRetentionPeriod = LogRetentionPeriod.threeDays,
     this.maxFileSize = 5 * 1024 * 1024, // 5MB
-    this.useIsolate = true,
+    this.logRequestBody = false,
+    this.maxRequestBodyLength = 5000, // 5000 caracteres por padrão
   });
+
+  TalkerPersistentConfig copyWith({
+    int? bufferSize,
+    bool? flushOnError,
+    int? maxCapacity,
+    bool? enableFileLogging,
+    bool? enableHiveLogging,
+    bool? saveAllLogs,
+    LogRetentionPeriod? logRetentionPeriod,
+    int? maxFileSize,
+    bool? logRequestBody,
+    int? maxRequestBodyLength,
+  }) {
+    return TalkerPersistentConfig(
+      bufferSize: bufferSize ?? this.bufferSize,
+      flushOnError: flushOnError ?? this.flushOnError,
+      maxCapacity: maxCapacity ?? this.maxCapacity,
+      enableFileLogging: enableFileLogging ?? this.enableFileLogging,
+      enableHiveLogging: enableHiveLogging ?? this.enableHiveLogging,
+      saveAllLogs: saveAllLogs ?? this.saveAllLogs,
+      logRetentionPeriod: logRetentionPeriod ?? this.logRetentionPeriod,
+      maxFileSize: maxFileSize ?? this.maxFileSize,
+      logRequestBody: logRequestBody ?? this.logRequestBody,
+      maxRequestBodyLength: maxRequestBodyLength ?? this.maxRequestBodyLength,
+    );
+  }
 }
 
 /// A persistent implementation of [TalkerHistory] that stores logs on disk using Hive.
@@ -745,32 +377,13 @@ class TalkerPersistentHistory implements TalkerHistory {
 
         if (!_isInitialized) {
           try {
-            if (config.useIsolate) {
-              // Usar isolate para operações de arquivo
-              final response = await _IsolateManager.instance.sendMessage(FileOperationMessage(
-                type: FileOperationType.initialize,
-                filePath: logFilePath,
-                saveAllLogs: config.saveAllLogs,
-                logRetentionPeriod: config.logRetentionPeriod,
-                maxFileSize: config.maxFileSize,
-                logName: logName,
-              ));
-
-              if (!response.success) {
-                // NÃO fazer throw aqui, apenas desabilitar file logging
-                _isInitialized = false;
-                return;
-              }
-            } else {
-              // Usar operações diretas na thread principal
-              _directFileManager = _LogFileManager(
-                filePath: logFilePath,
-                saveAllLogs: config.saveAllLogs,
-                logRetentionPeriod: config.logRetentionPeriod,
-                maxFileSize: config.maxFileSize,
-              );
-              await _directFileManager!.initialize();
-            }
+            _directFileManager = _LogFileManager(
+              filePath: logFilePath,
+              saveAllLogs: config.saveAllLogs,
+              logRetentionPeriod: config.logRetentionPeriod,
+              maxFileSize: config.maxFileSize,
+            );
+            await _directFileManager!.initialize();
 
             _isInitialized = true;
           } catch (e) {
@@ -811,20 +424,9 @@ class TalkerPersistentHistory implements TalkerHistory {
     try {
       String? content;
 
-      if (config.useIsolate) {
-        final response = await _IsolateManager.instance.sendMessage(FileOperationMessage(
-          type: FileOperationType.read,
-          logName: logName,
-        ));
-
-        if (response.success && response.content != null) {
-          content = response.content!;
-        }
-      } else {
-        // Usar leitura direta
-        if (_directFileManager != null) {
-          content = await _directFileManager!.read();
-        }
+      // Usar leitura direta
+      if (_directFileManager != null) {
+        content = await _directFileManager!.read();
       }
 
       if (content != null) {
@@ -854,16 +456,7 @@ class TalkerPersistentHistory implements TalkerHistory {
           final skipCount = math.max(0, logs.length - config.maxCapacity);
           final keepLogs = logs.skip(skipCount).toList();
 
-          if (config.useIsolate) {
-            await _IsolateManager.instance.sendMessage(FileOperationMessage(
-              type: FileOperationType.write,
-              logs: keepLogs,
-              maxCapacity: config.maxCapacity,
-              logName: logName,
-            ));
-          } else {
-            await _directFileManager!.write(keepLogs);
-          }
+          await _directFileManager!.write(keepLogs);
         }
       }
     } catch (e) {
@@ -885,31 +478,11 @@ class TalkerPersistentHistory implements TalkerHistory {
     }
 
     try {
-      if (config.useIsolate) {
-        // Usar isolate para escrita
-        final response = await _IsolateManager.instance.sendMessage(FileOperationMessage(
-          type: FileOperationType.write,
-          logs: bufferCopy,
-          maxCapacity: config.saveAllLogs ? null : config.maxCapacity,
-          logName: logName,
-        ));
-
-        if (!response.success) {
-          // NÃO fazer throw - apenas logar o erro
-
-          // Se buffer está muito grande, limpar para evitar memory leak
-          if (_writeBuffer.length > 500) {
-            _writeBuffer.clear();
-          }
-          return;
-        }
+      // Usar escrita direta na thread principal
+      if (_directFileManager != null) {
+        await _directFileManager!.write(bufferCopy);
       } else {
-        // Usar escrita direta na thread principal
-        if (_directFileManager != null) {
-          await _directFileManager!.write(bufferCopy);
-        } else {
-          return;
-        }
+        return;
       }
 
       // Só limpar buffer se escrita foi bem-sucedida
@@ -976,6 +549,84 @@ class TalkerPersistentHistory implements TalkerHistory {
       'http-response',
       'http-error',
     ].contains(title);
+  }
+
+  bool _isValidRequestBodyType(dynamic data) {
+    // Só aceita Map ou List de Map
+    if (data is Map) {
+      return true;
+    }
+    if (data is List) {
+      // Verifica se todos os elementos são Map
+      if (data.isEmpty) return true; // Lista vazia é válida
+      return data.every((item) => item is Map);
+    }
+    return false;
+  }
+
+  String _extractHttpRequestBody(TalkerData data) {
+    try {
+      // Se é DioResponseLog, extrair do requestOptions.data
+      if (data is DioResponseLog) {
+        final requestData = data.response.requestOptions.data;
+        if (requestData != null) {
+          // Só processa se for Map ou List de Map, ignora bytes, strings, etc
+          if (_isValidRequestBodyType(requestData)) {
+            try {
+              final bodyString = requestData.toString();
+              // Limita o tamanho conforme configuração
+              if (bodyString.length > config.maxRequestBodyLength) {
+                return '${bodyString.substring(0, config.maxRequestBodyLength)}... [truncated ${bodyString.length - config.maxRequestBodyLength} chars]';
+              }
+              return bodyString;
+            } catch (e) {
+              return '';
+            }
+          }
+        }
+      }
+
+      // Tentar extrair da mensagem usando regex (para logs de requisição que não são DioResponseLog)
+      final message = data.message ?? '';
+
+      // Padrão para "Data: {...}" ou "Body: {...}" - só captura Map ou List
+      final patterns = [
+        RegExp(r'Data:\s*(\{.*?\}|\[.*?\])', dotAll: true),
+        RegExp(r'Body:\s*(\{.*?\}|\[.*?\])', dotAll: true),
+        RegExp(r'Request Body:\s*(\{.*?\}|\[.*?\])', dotAll: true),
+        RegExp(r'POST.*?Data:\s*(\{.*?\}|\[.*?\])', dotAll: true),
+        RegExp(r'PUT.*?Data:\s*(\{.*?\}|\[.*?\])', dotAll: true),
+        RegExp(r'PATCH.*?Data:\s*(\{.*?\}|\[.*?\])', dotAll: true),
+      ];
+
+      for (final pattern in patterns) {
+        final match = pattern.firstMatch(message);
+        if (match != null && match.group(1) != null) {
+          final extracted = match.group(1)!;
+          // Limita o tamanho conforme configuração
+          if (extracted.length > config.maxRequestBodyLength) {
+            return '${extracted.substring(0, config.maxRequestBodyLength)}... [truncated ${extracted.length - config.maxRequestBodyLength} chars]';
+          }
+          return extracted;
+        }
+      }
+
+      // Tentar capturar JSON completo na mensagem (só Map ou List)
+      final jsonPattern = RegExp(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\])', dotAll: true);
+      final jsonMatch = jsonPattern.firstMatch(message);
+      if (jsonMatch != null) {
+        final extracted = jsonMatch.group(1)!;
+        // Limita o tamanho conforme configuração
+        if (extracted.length > config.maxRequestBodyLength) {
+          return '${extracted.substring(0, config.maxRequestBodyLength)}... [truncated ${extracted.length - config.maxRequestBodyLength} chars]';
+        }
+        return extracted;
+      }
+
+      return '';
+    } catch (e) {
+      return '';
+    }
   }
 
   String _extractHttpBody(TalkerData data) {
@@ -1059,11 +710,27 @@ class TalkerPersistentHistory implements TalkerHistory {
           final level = data.logLevel?.name.toUpperCase() ?? 'UNKNOWN';
           final msg = (data.message ?? '').replaceAll(RegExp(r'[\r\n]+'), ' ');
 
-          // Determinar se é REQUEST ou RESPONSE baseado no título ou presença de body
-          final isResponse = data.title?.toLowerCase().contains('response') == true || (data is DioResponseLog && data.response.data != null);
+          // Determinar se é REQUEST ou RESPONSE
+          // DioResponseLog sempre é uma resposta, mas contém info da requisição também
+          // Se não é DioResponseLog mas tem título "response", é resposta
+          // Caso contrário, é requisição
+          final isResponse = data is DioResponseLog || (data.title?.toLowerCase().contains('response') == true);
 
           if (isResponse) {
-            // Para respostas, mostrar apenas [RESPONSE]: com os dados
+            // Para DioResponseLog, logar primeiro a requisição (se logRequestBody estiver ativo)
+            if (data is DioResponseLog && config.logRequestBody) {
+              final requestOptions = data.response.requestOptions;
+              final requestUrl = requestOptions.uri.toString();
+              final requestBody = _extractHttpRequestBody(data);
+
+              String requestLog = '$timestamp [$level] [REQUEST] $requestUrl';
+              if (requestBody.isNotEmpty) {
+                requestLog += '\n$timestamp [$level] [REQUEST BODY]: $requestBody';
+              }
+              _writeBuffer.add(requestLog);
+            }
+
+            // Para respostas, mostrar [RESPONSE]: com os dados
             if (body.isNotEmpty && body != msg) {
               final responseLog = '$timestamp [$level] [RESPONSE]: $body';
               _writeBuffer.add(responseLog);
@@ -1073,8 +740,17 @@ class TalkerPersistentHistory implements TalkerHistory {
               _writeBuffer.add(responseLog);
             }
           } else {
-            // Para requisições, mostrar [REQUEST] com a URL
-            final requestLog = '$timestamp [$level] [REQUEST] $msg';
+            // Para requisições (não DioResponseLog), mostrar [REQUEST] com a URL
+            String requestLog = '$timestamp [$level] [REQUEST] $msg';
+
+            // Se logRequestBody está ativo, adicionar o body da requisição
+            if (config.logRequestBody) {
+              final requestBody = _extractHttpRequestBody(data);
+              if (requestBody.isNotEmpty) {
+                requestLog += '\n$timestamp [$level] [REQUEST BODY]: $requestBody';
+              }
+            }
+
             _writeBuffer.add(requestLog);
           }
         } else {
@@ -1129,17 +805,10 @@ class TalkerPersistentHistory implements TalkerHistory {
         await _flushBuffer();
       }
 
-      if (config.useIsolate) {
-        await _IsolateManager.instance.sendMessage(FileOperationMessage(
-          type: FileOperationType.dispose,
-          logName: logName,
-        ));
-      } else {
-        // Dispose do direct file manager
-        if (_directFileManager != null) {
-          await _directFileManager!.dispose();
-          _directFileManager = null;
-        }
+      // Dispose do direct file manager
+      if (_directFileManager != null) {
+        await _directFileManager!.dispose();
+        _directFileManager = null;
       }
 
       _isInitialized = false;
@@ -1153,10 +822,5 @@ class TalkerPersistentHistory implements TalkerHistory {
         log(e.toString(), name: 'TalkerPersistentHistory');
       }
     }
-  }
-
-  /// Dispose global do isolate singleton - deve ser chamado no shutdown do app
-  static Future<void> disposeGlobalIsolate() async {
-    _IsolateManager.instance.dispose();
   }
 }

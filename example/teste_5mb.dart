@@ -12,7 +12,6 @@ Future<void> testeLimite5MB() async {
   final config = TalkerPersistentConfig(
     bufferSize: 0, // Tempo real para garantir escrita imediata
     flushOnError: true,
-    useIsolate: false,
     maxCapacity: 10000, // Capacidade alta
     enableFileLogging: true,
     enableHiveLogging: false, // Apenas arquivo para o teste
