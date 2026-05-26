@@ -39,12 +39,7 @@ class _LogFileManager {
   String? currentDate;
   String? baseName;
 
-  _LogFileManager({
-    required this.filePath,
-    required this.saveAllLogs,
-    this.retentionDays = 3,
-    this.maxFileSize,
-  });
+  _LogFileManager({required this.filePath, required this.saveAllLogs, this.retentionDays = 3, this.maxFileSize});
 
   Future<void> initialize() async {
     baseName = path.basenameWithoutExtension(filePath);
@@ -81,6 +76,14 @@ class _LogFileManager {
 
   String _dateString(DateTime dt) => '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
 
+  String _formatTimestamp(DateTime dt) {
+    final date = _dateString(dt);
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    final s = dt.second.toString().padLeft(2, '0');
+    return '$date $h:$m:$s';
+  }
+
   Future<void> _deleteOldFiles() async {
     if (baseName == null) return;
     final basePath = logFile?.parent.path;
@@ -95,11 +98,7 @@ class _LogFileManager {
         if (!f.path.contains(baseName!) || !f.path.endsWith('.$_extension')) continue;
         final match = RegExp(r'(\d{4})-(\d{2})-(\d{2})').firstMatch(f.path);
         if (match == null) continue;
-        final fileDate = DateTime(
-          int.parse(match.group(1)!),
-          int.parse(match.group(2)!),
-          int.parse(match.group(3)!),
-        );
+        final fileDate = DateTime(int.parse(match.group(1)!), int.parse(match.group(2)!), int.parse(match.group(3)!));
         if (fileDate.isBefore(cutoff)) await f.delete();
       }
     } catch (_) {}
@@ -262,17 +261,9 @@ class TalkerPersistentHistory implements TalkerHistory {
   Completer<void>? _flushDone;
   _LogFileManager? _fileManager;
 
-  TalkerPersistentHistory({
-    required this.logName,
-    this.savePath,
-    TalkerPersistentConfig? config,
-  }) : config = config ?? const TalkerPersistentConfig();
+  TalkerPersistentHistory({required this.logName, this.savePath, TalkerPersistentConfig? config}) : config = config ?? const TalkerPersistentConfig();
 
-  static Future<TalkerPersistentHistory> create({
-    required String logName,
-    String? savePath,
-    TalkerPersistentConfig? config,
-  }) async {
+  static Future<TalkerPersistentHistory> create({required String logName, String? savePath, TalkerPersistentConfig? config}) async {
     final history = TalkerPersistentHistory(logName: logName, savePath: savePath, config: config);
     await history._initialize();
     return history;
@@ -358,7 +349,7 @@ class TalkerPersistentHistory implements TalkerHistory {
   }
 
   String _formatDioLog(TalkerData data) {
-    final timestamp = data.time.toIso8601String();
+    final timestamp = _formatTimestamp(data.time);
     final level = data.logLevel?.name.toUpperCase() ?? 'UNKNOWN';
 
     if (data is DioRequestLog) {
@@ -379,7 +370,7 @@ class TalkerPersistentHistory implements TalkerHistory {
       final responseData = data.response.data;
       final body = responseData != null && responseData is! List<int> ? _safeBodyString(responseData) : '';
       var entry = '$timestamp [$level] [RESPONSE] $status $method $url';
-      if (body.isNotEmpty) entry += '\n$timestamp [$level] [RESPONSE BODY] $body';
+      if (body.isNotEmpty) entry += ' [RESPONSE BODY] $body';
       return entry;
     }
 
@@ -399,7 +390,7 @@ class TalkerPersistentHistory implements TalkerHistory {
   }
 
   String formatLogSimple(TalkerData data) {
-    final timestamp = data.time.toIso8601String();
+    final timestamp = _formatTimestamp(data.time);
     final level = data.logLevel?.name.toUpperCase() ?? 'UNKNOWN';
     var msg = (data.message ?? '').replaceAll(RegExp(r'[\r\n]+'), ' ');
     if (msg.length > 800) msg = '${msg.substring(0, 800)}...';

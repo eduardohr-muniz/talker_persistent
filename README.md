@@ -85,14 +85,13 @@ final history = await TalkerPersistentHistory.create(
 
 ## File log format
 
-Each entry is a single line starting with an ISO-8601 timestamp:
+Each entry is a single line starting with a timestamp (`YYYY-MM-DD HH:MM:SS`):
 
 ```
-2024-06-01T12:34:56.789000 [INFO] User logged in
-2024-06-01T12:34:57.001000 [ERROR] DB connection failed [STACK] #0 main (main.dart:42)
-2024-06-01T12:34:58.123000 [INFO] [REQUEST] POST https://api.example.com/orders
-2024-06-01T12:34:58.456000 [INFO] [RESPONSE] 201 POST https://api.example.com/orders
-2024-06-01T12:34:58.456000 [INFO] [RESPONSE BODY] {"id":99,"status":"created"}
+2024-06-01 12:34:56 [INFO] User logged in
+2024-06-01 12:34:57 [ERROR] DB connection failed [STACK] #0 main (main.dart:42)
+2024-06-01 12:34:58 [INFO] [REQUEST] POST https://api.example.com/orders
+2024-06-01 12:34:58 [INFO] [RESPONSE] 201 POST https://api.example.com/orders [RESPONSE BODY] {"id":99,"status":"created"}
 ```
 
 ## Daily log files

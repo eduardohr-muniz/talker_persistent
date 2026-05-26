@@ -158,9 +158,9 @@ void main() {
       );
     });
 
-    test('includes ISO timestamp, level and message', () {
+    test('includes timestamp, level and message', () {
       final result = h.formatLogSimple(_infoLog('hello world'));
-      expect(result, matches(RegExp(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}')));
+      expect(result, matches(RegExp(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')));
       expect(result, contains('[INFO]'));
       expect(result, contains('hello world'));
     });
