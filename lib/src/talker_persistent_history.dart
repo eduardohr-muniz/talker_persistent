@@ -316,6 +316,8 @@ class TalkerPersistentHistory implements TalkerHistory {
   /// Flushes the write buffer to disk.
   /// Guard flag prevents concurrent flushes that would cause duplicate entries.
   /// Items added while a flush is in progress are picked up by the inner while-loop.
+  /// Capacity rotation runs here, after each batch, so it always sees an accurate
+  /// currentLogCount and never races with the write.
   Future<void> _flushBuffer() async {
     if (_isFlushing || _writeBuffer.isEmpty || !_isInitialized || !config.enableFileLogging) return;
     _isFlushing = true;
@@ -325,6 +327,7 @@ class TalkerPersistentHistory implements TalkerHistory {
         final batch = List<String>.from(_writeBuffer);
         _writeBuffer.clear();
         await _fileManager?.write(batch);
+        if (!config.saveAllLogs) await _rotateLogFile();
       }
     } catch (_) {
     } finally {
@@ -424,10 +427,7 @@ class TalkerPersistentHistory implements TalkerHistory {
 
       final shouldFlush = config.bufferSize == 0 || _shouldFlushImmediately(data) || _writeBuffer.length >= config.bufferSize;
 
-      if (shouldFlush) {
-        _flushBuffer();
-        if (!config.saveAllLogs) _rotateLogFile();
-      }
+      if (shouldFlush) _flushBuffer();
     } catch (_) {
       if (_writeBuffer.length > 1000) _writeBuffer.clear();
     }
