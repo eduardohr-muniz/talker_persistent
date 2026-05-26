@@ -153,13 +153,23 @@ class _LogFileManager {
       final kept = logs.skip(logs.length - keepCount).toList();
       final newContent = kept.join('\n');
       await logFile!.writeAsString(newContent);
-      currentLogCount = _splitLogEntries(newContent).length;
+      currentLogCount = kept.length;
     } catch (e) {
       log(e.toString(), name: 'TalkerPersistentHistory');
     }
   }
 
   Future<String> read() async => logFile == null ? '' : await logFile!.readAsString();
+
+  // Replaces the file content entirely — used by capacity rotation so that
+  // trimmed entries are removed rather than re-appended.
+  Future<void> overwriteEntries(List<String> entries) async {
+    if (logFile == null) return;
+    try {
+      await logFile!.writeAsString(entries.isEmpty ? '' : entries.join('\n'));
+      currentLogCount = entries.length;
+    } catch (_) {}
+  }
 
   Future<void> dispose() async {
     logFile = null;
@@ -288,13 +298,16 @@ class TalkerPersistentHistory implements TalkerHistory {
 
   Future<void> _rotateLogFile() async {
     if (!config.enableFileLogging || config.saveAllLogs || _fileManager == null) return;
+    // Fast path: use the in-memory count to avoid reading the file on every flush.
+    if (_fileManager!.currentLogCount <= config.maxCapacity) return;
     try {
       final content = await _fileManager!.read();
-      final logCount = _splitLogEntries(content).length;
-      if (logCount <= config.maxCapacity) return;
       final logs = _splitLogEntries(content);
-      final skipCount = math.max(0, logs.length - config.maxCapacity);
-      await _fileManager!.write(logs.skip(skipCount).toList());
+      // Keep the newest half (mirrors _rotateBySize) so the next rotation
+      // fires only after another maxCapacity/2 writes, not on every write.
+      final keepCount = (logs.length / 2).ceil();
+      final kept = logs.skip(logs.length - keepCount).toList();
+      await _fileManager!.overwriteEntries(kept);
     } catch (e) {
       log(e.toString(), name: 'TalkerPersistentHistory');
     }
