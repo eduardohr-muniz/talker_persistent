@@ -15,7 +15,7 @@ Future<void> debugRotacao() async {
     enableFileLogging: true,
     enableHiveLogging: false,
     saveAllLogs: false,
-    maxFileSize: 5 * 1024, // 5KB para teste rápido
+    maxFileSizeMb: 0.01, // ~10 KB limit for quick rotation testing
   );
 
   final history = await TalkerPersistentHistory.create(

@@ -133,7 +133,7 @@ Future<void> exemploSaveAllLogs() async {
     enableHiveLogging: true,
     saveAllLogs: true, // Nova funcionalidade: salvar todos os logs do dia
     retentionDays: 7, // Mantém logs por 1 semana
-    maxFileSize: 50 * 1024 * 1024, // 50MB por arquivo
+    maxFileSizeMb: 50,
   );
 
   final history = await TalkerPersistentHistory.create(

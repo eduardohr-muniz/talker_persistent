@@ -55,7 +55,7 @@ Future<TalkerPersistentHistory> _makeHistory(
   bool logRequestBody = false,
   int retentionDays = 3,
   bool saveAllLogs = false,
-  int maxFileSize = 5 * 1024 * 1024,
+  double maxFileSizeMb = 5.0,
   String logName = 'test',
 }) =>
     TalkerPersistentHistory.create(
@@ -67,7 +67,7 @@ Future<TalkerPersistentHistory> _makeHistory(
         logRequestBody: logRequestBody,
         retentionDays: retentionDays,
         saveAllLogs: saveAllLogs,
-        maxFileSize: maxFileSize,
+        maxFileSizeMb: maxFileSizeMb,
       ),
     );
 
@@ -89,7 +89,7 @@ void main() {
       expect(cfg.enableHiveLogging, isTrue);
       expect(cfg.saveAllLogs, isFalse);
       expect(cfg.retentionDays, 3);
-      expect(cfg.maxFileSize, 5 * 1024 * 1024);
+      expect(cfg.maxFileSizeMb, 5.0);
       expect(cfg.logRequestBody, isFalse);
       expect(cfg.maxRequestBodyLength, 5000);
     });
@@ -107,7 +107,7 @@ void main() {
       expect(updated.enableFileLogging, base.enableFileLogging);
       expect(updated.enableHiveLogging, base.enableHiveLogging);
       expect(updated.saveAllLogs, base.saveAllLogs);
-      expect(updated.maxFileSize, base.maxFileSize);
+      expect(updated.maxFileSizeMb, base.maxFileSizeMb);
       expect(updated.maxRequestBodyLength, base.maxRequestBodyLength);
     });
 
@@ -115,13 +115,13 @@ void main() {
       const cfg = TalkerPersistentConfig(
         bufferSize: 50,
         retentionDays: 7,
-        maxFileSize: 1024,
+        maxFileSizeMb: 10.0,
         saveAllLogs: true,
       );
       final copy = cfg.copyWith();
       expect(copy.bufferSize, 50);
       expect(copy.retentionDays, 7);
-      expect(copy.maxFileSize, 1024);
+      expect(copy.maxFileSizeMb, 10.0);
       expect(copy.saveAllLogs, isTrue);
     });
 
@@ -129,6 +129,14 @@ void main() {
       for (final days in [1, 3, 7, 14, 30, 365]) {
         final cfg = TalkerPersistentConfig(retentionDays: days);
         expect(cfg.retentionDays, days);
+      }
+    });
+
+    test('maxFileSizeMb accepts decimal (KB-range) values', () {
+      // 0.01 MB = 10240 bytes; 0.001 MB = 1048 bytes (~1 KB)
+      for (final mb in [0.001, 0.01, 0.1, 0.5, 1.0, 5.0, 50.0]) {
+        final cfg = TalkerPersistentConfig(maxFileSizeMb: mb);
+        expect(cfg.maxFileSizeMb, mb);
       }
     });
   });
@@ -643,27 +651,58 @@ void main() {
     });
 
     test('size rotation removes old entries when limit is exceeded', () async {
-      // Small limit so rotation is triggered early
-      const maxSize = 600;
-      final h = await _makeHistory(dir, bufferSize: 0, maxFileSize: maxSize);
+      // Pre-populate with exactly maxCapacity (1000) entries so _rotateLogFile
+      // returns early (logCount <= maxCapacity), avoiding a race with _flushBuffer.
+      // Each entry is ~1060 bytes so 1000 entries ≈ 1.06 MB > the 1 MB limit.
+      final logFile = File('${dir.path}/test.log');
+      final pad = 'X' * 1010; // 49 + 1010 = ~1059 bytes/entry × 1000 ≈ 1.06 MB
+      final lines = List.generate(
+        1000,
+        (i) =>
+            '2024-01-01T00:00:00.000000 [INFO] old-entry-${i.toString().padLeft(4, '0')} $pad',
+      ).join('\n');
+      await logFile.writeAsString('$lines\n');
 
-      // Await between writes so each flush completes and rotation can trigger
-      for (var i = 0; i < 30; i++) {
-        h.write(_infoLog('rotation-entry-${i.toString().padLeft(3, '0')}'));
-        await Future.delayed(const Duration(milliseconds: 3));
-      }
+      // Initialize history — reads existing file and registers currentLogCount.
+      // maxCapacity defaults to 1000, so _rotateLogFile returns early (1000 <= 1000)
+      // and only the size-based rotation (_rotateBySize) runs.
+      final h = await _makeHistory(dir, bufferSize: 0, maxFileSizeMb: 1.0);
+
+      // One new write: file size + entry > 1 MB → _rotateBySize fires, keeps newest half
+      h.write(_infoLog('new-entry-after-rotation'));
       await h.dispose();
 
       final content = await _readLog(dir, 'test');
-      // Last entry must always be present
-      expect(content, contains('rotation-entry-029'),
-          reason: 'Latest entry should be in the file');
-      // At least some early entries must have been rotated out
-      final hasEarly = content.contains('rotation-entry-000') ||
-          content.contains('rotation-entry-001') ||
-          content.contains('rotation-entry-002');
-      expect(hasEarly, isFalse,
-          reason: 'Oldest entries should have been removed by rotation');
+      expect(content, contains('new-entry-after-rotation'),
+          reason: 'New entry must survive rotation');
+      expect(content, isNot(contains('old-entry-0000')),
+          reason: 'Oldest entries should have been rotated out');
+      expect(content, isNot(contains('old-entry-0001')),
+          reason: 'entry-0001 should have been rotated out');
+    });
+
+    test('KB-range threshold (0.01 MB ≈ 10 KB) triggers rotation', () async {
+      // 0.01 MB = 10240 bytes. Pre-populate with ~12 KB of valid entries.
+      final logFile = File('${dir.path}/kb.log');
+      final pad = 'X' * 100; // ~150 bytes per entry × 80 entries ≈ 12 KB
+      final lines = List.generate(
+        80,
+        (i) =>
+            '2024-01-01T00:00:00.000000 [INFO] kb-old-${i.toString().padLeft(3, '0')} $pad',
+      ).join('\n');
+      await logFile.writeAsString('$lines\n');
+
+      final h = await _makeHistory(dir,
+          bufferSize: 0, maxFileSizeMb: 0.01, logName: 'kb');
+
+      h.write(_infoLog('kb-new-entry'));
+      await h.dispose();
+
+      final content = await _readLog(dir, 'kb');
+      expect(content, contains('kb-new-entry'),
+          reason: 'New entry must survive rotation');
+      expect(content, isNot(contains('kb-old-000')),
+          reason: 'Oldest KB entries should be rotated out');
     });
   });
 

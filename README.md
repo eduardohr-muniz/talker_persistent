@@ -1,342 +1,176 @@
-<!-- 
-This README describes the package. If you publish this package to pub.dev,
-this README's contents appear on the landing page for your package.
+# talker_persistent
 
-For information about how to write a good package README, see the guide for
-[writing package pages](https://dart.dev/tools/pub/writing-package-pages). 
-
-For general information about developing packages, see the Dart guide for
-[creating packages](https://dart.dev/guides/libraries/create-packages)
-and the Flutter guide for
-[developing packages and plugins](https://flutter.dev/to/develop-packages). 
--->
-
-# Talker Persistent
-
-An extension for the [talker](https://pub.dev/packages/talker) package that adds persistence to logs, allowing you to save logs both to files and Hive database, with flexible configuration options for buffer management and real-time logging.
+An extension for the [talker](https://pub.dev/packages/talker) package that persists logs to disk files and a [Hive CE](https://pub.dev/packages/hive_ce) database.
 
 ## Features
 
-- 📝 Save logs to text files
-- 💾 Persist logs using Hive database
-- 🔄 Configurable buffer size (real-time or buffered)
-- 🚨 Immediate flush for error and critical logs
-- 🎨 Beautiful log formatting
-- 🚀 Supports all Talker log types
-- 📱 Works with both Flutter and pure Dart
-- 🎛️ Flexible logging options (local storage or no storage)
-- ⚡ Real-time logging support (buffer size = 0)
+- Write logs to rotating text files with configurable size limit
+- Persist logs to Hive for in-app retrieval (`history` getter)
+- Configurable write buffer — real-time (`bufferSize: 0`) or batched
+- Immediate flush for `error` and `critical` log levels
+- Clean single-line formatting for Dio HTTP logs (`[REQUEST]`, `[RESPONSE]`, `[HTTP ERROR]`)
+- Optional request body logging with configurable max length
+- Daily log files with automatic retention cleanup (`saveAllLogs`)
+- Works with Flutter and pure Dart
 
-## Homologated Versions
+## Installation
 
-While the package is designed to be flexible with dependencies, here are the specific versions that have been thoroughly tested and are known to work well together:
+```yaml
+dependencies:
+  talker_persistent: ^3.0.0
+```
 
-| Package | Version | Description |
-|---------|---------|-------------|
-| talker |  ^4.8.2 | Core logging functionality |
-| path |  ^1.8.0 | Path manipulation utilities |
-| hive_ce |  ^2.11.3 | Local database storage |
-| collection |  ^1.19.1 | Collection utilities |
-
-These versions are provided for reference only. The package is designed to work with any compatible version of these dependencies to avoid conflicts with your project's requirements.
-
-## Usage
-
-### Basic Initialization
+## Quick start
 
 ```dart
-import 'package:talker_persistent/talker_persistent.dart';
 import 'package:talker/talker.dart';
+import 'package:talker_persistent/talker_persistent.dart';
 
 void main() async {
-  // Initialize TalkerPersistent
+  // Required only when enableHiveLogging is true (the default)
   await TalkerPersistent.instance.initialize(
     path: 'path/to/hive/directory',
-    logNames: {'my_app_logs'},
+    logNames: {'app'},
   );
 
-  // Create persistent history with default configuration
   final history = await TalkerPersistentHistory.create(
-    logName: 'my_app_logs',
+    logName: 'app',
     savePath: 'logs',
   );
 
-  // Use with Talker
   final talker = Talker(history: history);
-  
+
   talker.info('Application started');
-  talker.error('An error occurred');
+  talker.error('Something went wrong');
+
+  await history.dispose();
 }
 ```
 
-### Advanced Configuration
+## Configuration
 
-The package now supports flexible configuration through `TalkerPersistentConfig`:
+Pass a `TalkerPersistentConfig` to `TalkerPersistentHistory.create`:
 
 ```dart
-// Configuration with custom settings
-final config = TalkerPersistentConfig(
-  bufferSize: 0, // Real-time logging (no buffer)
-  flushOnError: true, // Immediate flush for errors
-  maxCapacity: 1000, // Maximum logs to keep
-  enableFileLogging: true, // Enable file logging
-  enableHiveLogging: true, // Enable Hive database logging
-);
-
 final history = await TalkerPersistentHistory.create(
-  logName: 'production_logs',
-  savePath: 'logs/production',
-  config: config,
+  logName: 'app',
+  savePath: 'logs',
+  config: TalkerPersistentConfig(
+    bufferSize: 0,           // real-time (0) or batched (> 0)
+    flushOnError: true,      // flush immediately on error/critical
+    maxCapacity: 1000,       // max entries kept in Hive
+    enableFileLogging: true,
+    enableHiveLogging: true,
+    maxFileSizeMb: 5,        // rotate file when it exceeds this size
+    logRequestBody: false,   // include HTTP request body in file logs
+    maxRequestBodyLength: 5000,
+  ),
 );
 ```
 
-### Configuration Options
+### All options
 
 | Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `bufferSize` | `int` | `100` | Buffer size for logs. If 0, logs are written immediately (real-time). If > 0, logs are buffered and written when buffer is full. |
-| `flushOnError` | `bool` | `true` | Whether to flush immediately for error and critical logs |
-| `maxCapacity` | `int` | `1000` | Maximum number of logs to keep in history |
-| `enableFileLogging` | `bool` | `true` | Whether to enable file logging |
-| `enableHiveLogging` | `bool` | `true` | Whether to enable Hive database logging |
-| `saveAllLogs` | `bool` | `false` | Whether to save all logs of the day in daily files |
-| `logRetentionPeriod` | `LogRetentionPeriod` | `threeDays` | Period to retain log files when using saveAllLogs |
-| `maxFileSize` | `int` | `5MB` | Maximum file size in bytes. When reached, removes oldest half |
+|---|---|---|---|
+| `bufferSize` | `int` | `100` | Entries to accumulate before flushing. `0` = write every entry immediately. |
+| `flushOnError` | `bool` | `true` | Flush the buffer immediately when an `error` or `critical` entry is written. |
+| `maxCapacity` | `int` | `1000` | Maximum entries kept in the Hive database. Oldest entries are evicted first. |
+| `enableFileLogging` | `bool` | `true` | Write logs to a text file. |
+| `enableHiveLogging` | `bool` | `true` | Persist logs in Hive (required for `history` getter). |
+| `saveAllLogs` | `bool` | `false` | Write to daily files named `logName-YYYY-MM-DD.log` instead of a single file. |
+| `retentionDays` | `int` | `3` | Number of days to keep daily log files (used with `saveAllLogs: true`). |
+| `maxFileSizeMb` | `double` | `5.0` | Maximum file size in MB. Accepts decimals (e.g. `0.01` ≈ 10 KB). When exceeded, the oldest half of entries is removed. |
+| `logRequestBody` | `bool` | `false` | Include the HTTP request body in file log entries. |
+| `maxRequestBodyLength` | `int` | `5000` | Truncate request/response bodies beyond this many characters. |
 
-### Real-time Logging
+## File log format
 
-For critical applications where immediate log writing is required:
+Each entry is a single line starting with an ISO-8601 timestamp:
 
-```dart
-final config = TalkerPersistentConfig(
-  bufferSize: 0, // No buffer - real-time logging
-  flushOnError: true, // Always flush errors immediately
-  maxCapacity: 5000, // High capacity for production
-);
-
-final history = await TalkerPersistentHistory.create(
-  logName: 'critical_logs',
-  savePath: 'logs/critical',
-  config: config,
-);
+```
+2024-06-01T12:34:56.789000 [INFO] User logged in
+2024-06-01T12:34:57.001000 [ERROR] DB connection failed [STACK] #0 main (main.dart:42)
+2024-06-01T12:34:58.123000 [INFO] [REQUEST] POST https://api.example.com/orders
+2024-06-01T12:34:58.456000 [INFO] [RESPONSE] 201 POST https://api.example.com/orders
+2024-06-01T12:34:58.456000 [INFO] [RESPONSE BODY] {"id":99,"status":"created"}
 ```
 
-### Buffered Logging
+## Daily log files
 
-For performance optimization with buffered writes:
-
-```dart
-final config = TalkerPersistentConfig(
-  bufferSize: 100, // Buffer 100 logs before writing
-  flushOnError: true, // Still flush errors immediately
-  maxCapacity: 1000,
-);
-
-final history = await TalkerPersistentHistory.create(
-  logName: 'performance_logs',
-  savePath: 'logs/performance',
-  config: config,
-);
-```
-
-### File-only Logging
-
-If you only want file logging without Hive database:
+When `saveAllLogs: true`, a new file is created each day and old files are automatically deleted after `retentionDays`:
 
 ```dart
-final config = TalkerPersistentConfig(
-  bufferSize: 50,
-  flushOnError: true,
-  maxCapacity: 500,
-  enableFileLogging: true,
-  enableHiveLogging: false, // Disable Hive
-);
-
 final history = await TalkerPersistentHistory.create(
-  logName: 'file_only_logs',
-  savePath: 'logs/file_only',
-  config: config,
+  logName: 'app',
+  savePath: 'logs',
+  config: TalkerPersistentConfig(
+    saveAllLogs: true,
+    retentionDays: 7,
+  ),
 );
+// Creates: logs/app-2024-06-01.log, logs/app-2024-06-02.log, …
 ```
 
-### Error Handling
+## Dio HTTP logging
 
-The package automatically handles error and critical logs with immediate flush when `flushOnError` is enabled:
+Pair with [talker_dio_logger](https://pub.dev/packages/talker_dio_logger) to automatically capture HTTP traffic:
 
 ```dart
 final talker = Talker(history: history);
 
-// These will be flushed immediately if flushOnError is true
-talker.error('Database connection failed');
-talker.critical('Application crash detected');
-
-// Normal logs follow the buffer configuration
-talker.info('User logged in');
-talker.debug('Processing request');
-```
-
-### File Size Control
-
-The package now includes automatic file size management to prevent log files from growing too large:
-
-```dart
-final config = TalkerPersistentConfig(
-  bufferSize: 0, // Real-time logging
-  maxFileSize: 5 * 1024 * 1024, // 5MB limit
-  enableFileLogging: true,
-);
-
-final history = await TalkerPersistentHistory.create(
-  logName: 'controlled_logs',
-  savePath: 'logs',
-  config: config,
-);
-```
-
-**How it works:**
-- When the log file reaches the specified `maxFileSize` (default: 5MB)
-- The system automatically removes the oldest half of the logs
-- Keeps only the most recent logs
-- This prevents the file from growing indefinitely
-- Perfect for long-running applications
-
-**Benefits:**
-- ✅ Prevents disk space issues
-- ✅ Maintains recent logs for debugging
-- ✅ Automatic cleanup without manual intervention
-- ✅ Configurable size limit
-- ✅ Preserves log integrity
-
-## Configuração
-
-A classe `TalkerPersistentConfig` permite configurar o comportamento do logging:
-
-```dart
-final config = TalkerPersistentConfig(
-  bufferSize: 100,           // Tamanho do buffer (0 = real-time)
-  flushOnError: true,        // Flush imediato em erros críticos
-  maxCapacity: 1000,         // Capacidade máxima do log
-  enableFileLogging: true,   // Habilitar logging em arquivo
-  enableHiveLogging: true,   // Habilitar logging no Hive
-  saveAllLogs: false,        // Salvar todos os logs ou rotacionar
-  logRetentionPeriod: LogRetentionPeriod.threeDays, // Período de retenção
-  maxFileSize: 5 * 1024 * 1024, // Tamanho máximo do arquivo (5MB)
-  useIsolate: true,          // Usar isolate para operações de arquivo (padrão: true)
-);
-```
-
-### Parâmetro `useIsolate`
-
-O parâmetro `useIsolate` permite controlar se as operações de arquivo devem ser executadas em um isolate separado ou na thread principal:
-
-- **`useIsolate: true`** (padrão): Usa isolate para operações de arquivo
-  - ✅ Não bloqueia a UI
-  - ✅ Melhor performance em aplicações grandes
-  - ✅ Recomendado para aplicações Flutter
-
-- **`useIsolate: false`**: Executa operações na thread principal
-  - ✅ Menor overhead de memória
-  - ✅ Mais simples para depuração
-  - ✅ Recomendado para aplicações Dart puras ou casos específicos
-
-```dart
-// Exemplo sem isolate (thread principal)
-final historyWithoutIsolate = await TalkerPersistentHistory.create(
-  logName: 'app_logs',
-  savePath: '/path/to/logs',
-  config: TalkerPersistentConfig(
-    useIsolate: false, // ← Desabilita o uso de isolate
-  ),
-);
-
-// Exemplo com isolate (padrão)
-final historyWithIsolate = await TalkerPersistentHistory.create(
-  logName: 'app_logs',
-  savePath: '/path/to/logs',
-  config: TalkerPersistentConfig(
-    useIsolate: true, // ← Usa isolate (padrão)
+dio.interceptors.add(
+  TalkerDioLogger(
+    talker: talker,
+    settings: TalkerDioLoggerSettings(
+      printRequestData: true,
+    ),
   ),
 );
 ```
 
-### Quando usar cada opção?
+Log entries are formatted without box-drawing characters, making them easy to parse or grep:
 
-**Use `useIsolate: true` quando:**
-- Aplicação Flutter com interface de usuário
-- Volume alto de logs
-- Performance da UI é crítica
-- Operações de arquivo podem ser demoradas
-
-**Use `useIsolate: false` quando:**
-- Aplicação Dart pura (sem UI)
-- Volume baixo de logs
-- Problemas específicos com isolates
-- Necessidade de menor uso de memória
-- Depuração de problemas de logging
-
-## Examples
-
-See the `example/` directory for complete working examples:
-
-- `talker_persistent_example.dart` - Demonstrates different configuration scenarios
-- `example_flutter/` - Flutter-specific example
-
-## Migration from Previous Versions
-
-If you're upgrading from a previous version, the main changes are:
-
-1. **New Configuration Class**: Use `TalkerPersistentConfig` instead of individual parameters
-2. **Buffer Control**: New `bufferSize` parameter for real-time vs buffered logging
-3. **Error Flush**: New `flushOnError` parameter for immediate error logging
-4. **Selective Logging**: New `enableFileLogging` and `enableHiveLogging` parameters
-
-### Old Way:
-```dart
-final history = await TalkerPersistentHistory.create(
-  logName: 'logs',
-  savePath: 'logs',
-  maxCapacity: 1000,
-);
+```
+2024-06-01T12:00:00.000 [INFO] [REQUEST] GET https://api.example.com/users
+2024-06-01T12:00:00.150 [INFO] [RESPONSE] 200 GET https://api.example.com/users
+2024-06-01T12:00:05.000 [ERROR] [HTTP ERROR] 503 GET https://api.example.com/users - Service Unavailable
 ```
 
-### New Way:
-```dart
-final config = TalkerPersistentConfig(
-  bufferSize: 100,
-  flushOnError: true,
-  maxCapacity: 1000,
-  enableFileLogging: true,
-  enableHiveLogging: true,
-);
+## Reading history
 
-final history = await TalkerPersistentHistory.create(
-  logName: 'logs',
-  savePath: 'logs',
-  config: config,
-);
+The `history` getter returns entries from Hive (requires `enableHiveLogging: true`):
+
+```dart
+final logs = history.history; // List<TalkerData>
+for (final entry in logs) {
+  print('${entry.time} ${entry.logLevel} ${entry.message}');
+}
 ```
 
-## Contributing
+## Cleanup
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Always call `dispose` before your app exits to flush any buffered entries:
+
+```dart
+await history.dispose();
+```
+
+## Migration from 2.x
+
+```dart
+// Before
+TalkerPersistentConfig(
+  logRetentionPeriod: LogRetentionPeriod.week,
+  maxFileSize: 50 * 1024 * 1024,
+)
+
+// After
+TalkerPersistentConfig(
+  retentionDays: 7,
+  maxFileSizeMb: 50,
+)
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-```
-MIT License
-
-Copyright (c) 2024 Talker Persistent
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-For the complete license text, please see the [LICENSE](LICENSE) file.
+MIT

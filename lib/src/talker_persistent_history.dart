@@ -11,12 +11,15 @@ import 'package:talker_persistent/src/talker_persistent_service.dart';
 
 const String _extension = 'log';
 
+// An entry starts with an ISO-8601 timestamp (YYYY-MM-DDTHH:MM:SS...)
+final _entryStartPattern = RegExp(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}');
+
 List<String> _splitLogEntries(String content) {
   final lines = content.split('\n');
   final logs = <String>[];
   var current = <String>[];
   for (final line in lines) {
-    if (line.contains('┌')) {
+    if (_entryStartPattern.hasMatch(line)) {
       if (current.isNotEmpty) logs.add(current.join('\n'));
       current = [line];
     } else if (current.isNotEmpty) {
@@ -66,7 +69,7 @@ class _LogFileManager {
     if (await logFile!.exists()) {
       try {
         final content = await logFile!.readAsString();
-        currentLogCount = '┌'.allMatches(content).length;
+        currentLogCount = _splitLogEntries(content).length;
       } catch (_) {
         currentLogCount = 0;
       }
@@ -119,7 +122,7 @@ class _LogFileManager {
     }
 
     final content = '${logs.join('\n')}\n';
-    final newLogCount = '┌'.allMatches(content).length;
+    final newLogCount = _splitLogEntries(content).length;
 
     if (maxFileSize != null) {
       try {
@@ -150,7 +153,7 @@ class _LogFileManager {
       final kept = logs.skip(logs.length - keepCount).toList();
       final newContent = kept.join('\n');
       await logFile!.writeAsString(newContent);
-      currentLogCount = '┌'.allMatches(newContent).length;
+      currentLogCount = _splitLogEntries(newContent).length;
     } catch (e) {
       log(e.toString(), name: 'TalkerPersistentHistory');
     }
@@ -189,8 +192,9 @@ class TalkerPersistentConfig {
   /// How many days to retain daily log files. Only used with [saveAllLogs].
   final int retentionDays;
 
-  /// Maximum file size in bytes before rotation (default: 5 MB).
-  final int maxFileSize;
+  /// Maximum log file size in megabytes before rotation (default: 5 MB).
+  /// Accepts decimals, e.g. `0.01` for ~10 KB.
+  final double maxFileSizeMb;
 
   /// Include request body in HTTP log entries.
   final bool logRequestBody;
@@ -206,7 +210,7 @@ class TalkerPersistentConfig {
     this.enableHiveLogging = true,
     this.saveAllLogs = false,
     this.retentionDays = 3,
-    this.maxFileSize = 5 * 1024 * 1024,
+    this.maxFileSizeMb = 5.0,
     this.logRequestBody = false,
     this.maxRequestBodyLength = 5000,
   });
@@ -219,7 +223,7 @@ class TalkerPersistentConfig {
     bool? enableHiveLogging,
     bool? saveAllLogs,
     int? retentionDays,
-    int? maxFileSize,
+    double? maxFileSizeMb,
     bool? logRequestBody,
     int? maxRequestBodyLength,
   }) {
@@ -231,7 +235,7 @@ class TalkerPersistentConfig {
       enableHiveLogging: enableHiveLogging ?? this.enableHiveLogging,
       saveAllLogs: saveAllLogs ?? this.saveAllLogs,
       retentionDays: retentionDays ?? this.retentionDays,
-      maxFileSize: maxFileSize ?? this.maxFileSize,
+      maxFileSizeMb: maxFileSizeMb ?? this.maxFileSizeMb,
       logRequestBody: logRequestBody ?? this.logRequestBody,
       maxRequestBodyLength: maxRequestBodyLength ?? this.maxRequestBodyLength,
     );
@@ -273,7 +277,7 @@ class TalkerPersistentHistory implements TalkerHistory {
         filePath: path.join(savePath!, '$logName.$_extension'),
         saveAllLogs: config.saveAllLogs,
         retentionDays: config.retentionDays,
-        maxFileSize: config.maxFileSize,
+        maxFileSize: (config.maxFileSizeMb * 1024 * 1024).round(),
       );
       await _fileManager!.initialize();
       _isInitialized = true;
@@ -286,7 +290,7 @@ class TalkerPersistentHistory implements TalkerHistory {
     if (!config.enableFileLogging || config.saveAllLogs || _fileManager == null) return;
     try {
       final content = await _fileManager!.read();
-      final logCount = '┌'.allMatches(content).length;
+      final logCount = _splitLogEntries(content).length;
       if (logCount <= config.maxCapacity) return;
       final logs = _splitLogEntries(content);
       final skipCount = math.max(0, logs.length - config.maxCapacity);

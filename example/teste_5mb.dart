@@ -16,7 +16,7 @@ Future<void> testeLimite5MB() async {
     enableFileLogging: true,
     enableHiveLogging: false, // Apenas arquivo para o teste
     saveAllLogs: false, // Não usar saveAllLogs para este teste
-    maxFileSize: 5 * 1024 * 1024, // 5MB
+    maxFileSizeMb: 5,
   );
 
   final history = await TalkerPersistentHistory.create(
