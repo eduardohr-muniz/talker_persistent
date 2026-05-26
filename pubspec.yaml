@@ -10,11 +10,11 @@ environment:
 
 # Add regular dependencies here.
 dependencies:
-  talker: any
+  talker: ^5.1.17
   path: ^1.9.0
-  hive_ce: any
-  collection: any
-  talker_dio_logger: any
+  hive_ce: ^2.19.3
+  collection: ^1.19.1
+  talker_dio_logger: ^5.1.17
 
 dev_dependencies:
   build_runner: ^2.4.15

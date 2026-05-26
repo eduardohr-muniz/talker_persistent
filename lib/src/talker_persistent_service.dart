@@ -91,9 +91,5 @@ class TalkerPersistent {
   }
 
   /// Dispose global de recursos do sistema de logging persistente
-  static Future<void> disposeGlobalResources() async {
-    try {
-      // Esta função pode ser expandida no futuro para outros recursos globais
-    } catch (e) {}
-  }
+  static Future<void> disposeGlobalResources() async {}
 }
