@@ -27,7 +27,7 @@ Future<void> exemploComBuffer() async {
     maxCapacity: 1000, // Máximo de 1000 logs
     enableFileLogging: true,
     enableHiveLogging: true,
-    logRetentionPeriod: LogRetentionPeriod.threeDays,
+    retentionDays: 3,
   );
 
   final history = await TalkerPersistentHistory.create(
@@ -132,7 +132,7 @@ Future<void> exemploSaveAllLogs() async {
     enableFileLogging: true,
     enableHiveLogging: true,
     saveAllLogs: true, // Nova funcionalidade: salvar todos os logs do dia
-    logRetentionPeriod: LogRetentionPeriod.week, // Mantém logs por 1 semana
+    retentionDays: 7, // Mantém logs por 1 semana
     maxFileSize: 50 * 1024 * 1024, // 50MB por arquivo
   );
 
