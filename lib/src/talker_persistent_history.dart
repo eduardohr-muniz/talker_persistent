@@ -348,6 +348,15 @@ class TalkerPersistentHistory implements TalkerHistory {
     }
   }
 
+  String _formatTimestamp(DateTime? dt) {
+    final now = dt ?? DateTime.now();
+    final date = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final h = now.hour.toString().padLeft(2, '0');
+    final m = now.minute.toString().padLeft(2, '0');
+    final s = now.second.toString().padLeft(2, '0');
+    return '$date $h:$m:$s';
+  }
+
   String _formatDioLog(TalkerData data) {
     final timestamp = _formatTimestamp(data.time);
     final level = data.logLevel?.name.toUpperCase() ?? 'UNKNOWN';
